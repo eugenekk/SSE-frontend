@@ -1,103 +1,254 @@
-import Image from "next/image";
+'use client';
+
+import { useState, useCallback, useEffect } from 'react';
+import { useToast } from '@/hooks/useToast';
+import { Toast } from '@/components/Toast';
+
+interface Job {
+  jobId: string;
+  type: string;
+  status: string;
+  progress: number;
+  createdAt: string;
+}
+
+interface QueueStatus {
+  pending: number;
+  processing: string | null;
+  completed: number;
+}
+
+const API_URL = 'http://localhost:8080'; // process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080';
 
 export default function Home() {
-  return (
-    <div className="font-sans grid grid-rows-[20px_1fr_20px] items-center justify-items-center min-h-screen p-8 pb-20 gap-16 sm:p-20">
-      <main className="flex flex-col gap-[32px] row-start-2 items-center sm:items-start">
-        <Image
-          className="dark:invert"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={180}
-          height={38}
-          priority
-        />
-        <ol className="font-mono list-inside list-decimal text-sm/6 text-center sm:text-left">
-          <li className="mb-2 tracking-[-.01em]">
-            Get started by editing{" "}
-            <code className="bg-black/[.05] dark:bg-white/[.06] font-mono font-semibold px-1 py-0.5 rounded">
-              app/page.tsx
-            </code>
-            .
-          </li>
-          <li className="tracking-[-.01em]">
-            Save and see your changes instantly.
-          </li>
-        </ol>
+  const [jobs, setJobs] = useState<Job[]>([]);
+  const [queueStatus, setQueueStatus] = useState<QueueStatus | null>(null);
+  const { messages, showToast, removeMessage } = useToast();
 
-        <div className="flex gap-4 items-center flex-col sm:flex-row">
-          <a
-            className="rounded-full border border-solid border-transparent transition-colors flex items-center justify-center bg-foreground text-background gap-2 hover:bg-[#383838] dark:hover:bg-[#ccc] font-medium text-sm sm:text-base h-10 sm:h-12 px-4 sm:px-5 sm:w-auto"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <Image
-              className="dark:invert"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={20}
-              height={20}
-            />
-            Deploy now
-          </a>
-          <a
-            className="rounded-full border border-solid border-black/[.08] dark:border-white/[.145] transition-colors flex items-center justify-center hover:bg-[#f2f2f2] dark:hover:bg-[#1a1a1a] hover:border-transparent font-medium text-sm sm:text-base h-10 sm:h-12 px-4 sm:px-5 w-full sm:w-auto md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Read our docs
-          </a>
+  const updateJobProgress = useCallback((jobId: string, progress: number) => {
+    setJobs(prev => prev.map(job => 
+      job.jobId === jobId ? { ...job, progress } : job
+    ));
+  }, []);
+
+  const updateJobComplete = useCallback((jobId: string) => {
+    setJobs(prev => prev.map(job => 
+      job.jobId === jobId ? { ...job, status: 'completed', progress: 100 } : job
+    ));
+  }, []);
+
+  const handleJobError = useCallback((jobId: string, error: string) => {
+    setJobs(prev => prev.map(job => 
+      job.jobId === jobId ? { ...job, status: 'error' } : job
+    ));
+    showToast('error', `Job ${jobId} failed: ${error}`);
+  }, [showToast]);
+
+  const [isConnected, setIsConnected] = useState(false);
+
+  useEffect(() => {
+    const eventSource = new EventSource(`${API_URL}/api/events`);
+    
+    eventSource.onopen = () => {
+      console.log('SSE Connected');
+      setIsConnected(true);
+      showToast('info', 'Connected to server');
+    };
+
+    eventSource.onerror = (error) => {
+      console.error('SSE Error:', error);
+      setIsConnected(false);
+    };
+
+    eventSource.addEventListener('job-progress', (e) => {
+      const data = JSON.parse(e.data);
+      updateJobProgress(data.jobId, data.progress);
+    });
+
+    eventSource.addEventListener('job-complete', (e) => {
+      const data = JSON.parse(e.data);
+      updateJobComplete(data.jobId);
+      showToast('success', `Job ${data.jobId.slice(0, 8)} completed!`);
+    });
+
+    eventSource.addEventListener('job-error', (e) => {
+      const data = JSON.parse(e.data);
+      handleJobError(data.jobId, data.error);
+    });
+
+    eventSource.addEventListener('queue-status', (e) => {
+      const data = JSON.parse(e.data);
+      setQueueStatus(data);
+    });
+
+    eventSource.addEventListener('heartbeat', () => {
+      // Silent heartbeat
+    });
+
+    return () => {
+      eventSource.close();
+      setIsConnected(false);
+    };
+  }, [updateJobProgress, updateJobComplete, handleJobError, showToast]);
+
+  const createJob = async (type: string) => {
+    try {
+      const response = await fetch(`${API_URL}/api/generate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ type, data: {} })
+      });
+
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`);
+      }
+      
+      const data = await response.json();
+      const newJob: Job = {
+        jobId: data.jobId,
+        type,
+        status: data.status,
+        progress: 0,
+        createdAt: new Date().toISOString()
+      };
+      
+      setJobs(prev => [newJob, ...prev]);
+      showToast('info', `Job created: ${data.jobId.slice(0, 8)}`);
+    } catch (error) {
+      console.error('Failed to create job:', error);
+      showToast('error', 'Failed to create job. Check if server is running.');
+    }
+  };
+
+  const getStatusColor = (status: string) => {
+    switch (status) {
+      case 'completed': return 'bg-green-100 text-green-800';
+      case 'processing': return 'bg-yellow-100 text-yellow-800';
+      case 'error': return 'bg-red-100 text-red-800';
+      default: return 'bg-gray-100 text-gray-800';
+    }
+  };
+
+  const getProgressColor = (status: string) => {
+    switch (status) {
+      case 'error': return 'bg-red-500';
+      case 'completed': return 'bg-green-500';
+      default: return 'bg-blue-500';
+    }
+  };
+
+  return (
+    <div className="min-h-screen bg-gray-50 py-8">
+      <div className="max-w-6xl mx-auto px-4">
+        <h1 className="text-3xl font-bold text-gray-900 mb-8">SSE MVP Test</h1>
+        
+        {/* Connection Status */}
+        <div className="mb-6 flex items-center gap-2">
+          <div className={`w-3 h-3 rounded-full ${isConnected ? 'bg-green-500' : 'bg-red-500'}`} />
+          <span className="text-sm text-gray-600">
+            SSE {isConnected ? 'Connected' : 'Disconnected'}
+          </span>
         </div>
-      </main>
-      <footer className="row-start-3 flex gap-[24px] flex-wrap items-center justify-center">
-        <a
-          className="flex items-center gap-2 hover:underline hover:underline-offset-4"
-          href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <Image
-            aria-hidden
-            src="/file.svg"
-            alt="File icon"
-            width={16}
-            height={16}
-          />
-          Learn
-        </a>
-        <a
-          className="flex items-center gap-2 hover:underline hover:underline-offset-4"
-          href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <Image
-            aria-hidden
-            src="/window.svg"
-            alt="Window icon"
-            width={16}
-            height={16}
-          />
-          Examples
-        </a>
-        <a
-          className="flex items-center gap-2 hover:underline hover:underline-offset-4"
-          href="https://nextjs.org?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <Image
-            aria-hidden
-            src="/globe.svg"
-            alt="Globe icon"
-            width={16}
-            height={16}
-          />
-          Go to nextjs.org →
-        </a>
-      </footer>
+
+        {/* Queue Status */}
+        {queueStatus && (
+          <div className="bg-white rounded-lg shadow p-4 mb-6">
+            <h2 className="text-lg font-semibold mb-2">Queue Status</h2>
+            <div className="grid grid-cols-3 gap-4 text-sm">
+              <div>
+                <span className="text-gray-600">Pending:</span>
+                <span className="ml-2 font-medium">{queueStatus.pending}</span>
+              </div>
+              <div>
+                <span className="text-gray-600">Processing:</span>
+                <span className="ml-2 font-medium">
+                  {queueStatus.processing ? queueStatus.processing.slice(0, 8) : 'None'}
+                </span>
+              </div>
+              <div>
+                <span className="text-gray-600">Completed:</span>
+                <span className="ml-2 font-medium">{queueStatus.completed}</span>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Job Creation Buttons */}
+        <div className="bg-white rounded-lg shadow p-4 mb-6">
+          <h2 className="text-lg font-semibold mb-3">Create Job</h2>
+          <div className="flex gap-3">
+            <button
+              onClick={() => createJob('standard')}
+              className="px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600 transition disabled:opacity-50"
+              disabled={!isConnected}
+            >
+              Standard (5s)
+            </button>
+            <button
+              onClick={() => createJob('long')}
+              className="px-4 py-2 bg-green-500 text-white rounded hover:bg-green-600 transition disabled:opacity-50"
+              disabled={!isConnected}
+            >
+              Long (10s)
+            </button>
+            <button
+              onClick={() => createJob('extended')}
+              className="px-4 py-2 bg-purple-500 text-white rounded hover:bg-purple-600 transition disabled:opacity-50"
+              disabled={!isConnected}
+            >
+              Extended (15s)
+            </button>
+          </div>
+          {!isConnected && (
+            <p className="text-sm text-red-600 mt-2">Connect to server to create jobs</p>
+          )}
+        </div>
+
+        {/* Jobs List */}
+        <div className="bg-white rounded-lg shadow p-4">
+          <h2 className="text-lg font-semibold mb-3">Jobs</h2>
+          {jobs.length === 0 ? (
+            <p className="text-gray-500 text-sm">No jobs yet. Create one above!</p>
+          ) : (
+            <div className="space-y-3">
+              {jobs.map(job => (
+                <div key={job.jobId} className="border rounded p-3">
+                  <div className="flex justify-between items-start mb-2">
+                    <div>
+                      <span className="font-mono text-sm text-gray-600">
+                        {job.jobId.slice(0, 8)}...
+                      </span>
+                      <div className="text-sm mt-1">
+                        <span className="capitalize px-2 py-1 rounded text-xs bg-gray-100">
+                          {job.type}
+                        </span>
+                        <span className={`ml-2 px-2 py-1 rounded text-xs ${getStatusColor(job.status)}`}>
+                          {job.status}
+                        </span>
+                      </div>
+                    </div>
+                    <span className="text-xs text-gray-500">
+                      {new Date(job.createdAt).toLocaleTimeString()}
+                    </span>
+                  </div>
+                  
+                  {/* Progress Bar */}
+                  <div className="w-full bg-gray-200 rounded-full h-2">
+                    <div 
+                      className={`h-2 rounded-full transition-all duration-300 ${getProgressColor(job.status)}`}
+                      style={{ width: `${job.progress}%` }}
+                    />
+                  </div>
+                  <div className="text-xs text-gray-600 mt-1">{job.progress}%</div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Toast Notifications */}
+      <Toast messages={messages} removeMessage={removeMessage} />
     </div>
   );
 }
